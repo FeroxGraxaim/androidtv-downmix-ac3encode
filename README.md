@@ -5,6 +5,15 @@ Uninstall the official app first; this APK is signed with a different key.
 
 On **MPV**, each multichannel audio track gets a virtual sibling labeled `<source> (Dialogue downmix)`. Selecting it keeps the original audio track and applies lavfi pan + compressor + limiter. Selecting the original clears the filter.
 
+## Install
+
+Prebuilt APKs: [Releases](https://github.com/jimzrt/androidtv-downmix/releases). Pick the ABI for your device (`armeabi-v7a` on most Fire TV / Android TV boxes, `arm64-v8a` on newer 64-bit devices).
+
+```sh
+adb uninstall com.stremio.one
+adb install stremio-androidtv-downmix-1.10.4-armeabi-v7a.apk
+```
+
 ## Need
 
 `apktool`, `zipalign`, `apksigner`, `keytool`. Official APKs are downloaded into `vendor/` (or drop them there yourself).
@@ -20,11 +29,6 @@ On **MPV**, each multichannel audio track gets a virtual sibling labeled `<sourc
 ```
 
 Output: `dist/stremio-androidtv-downmix-<version>-<abi>.apk`
-
-```sh
-adb uninstall com.stremio.one
-adb install dist/stremio-androidtv-downmix-1.10.4-armeabi-v7a.apk
-```
 
 A keystore is created at `signing/downmix.jks` on the first run. Keep it so later patched builds upgrade in place.
 
