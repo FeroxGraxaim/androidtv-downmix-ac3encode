@@ -1,9 +1,9 @@
 # Stremio Android TV — Dialogue downmix
 
-Patched official Stremio Android TV. Same package: `com.stremio.one`.
+Patched official Stremio Android TV.
 Uninstall the official app first; this APK is signed with a different key.
 
-On **MPV**, each multichannel audio track gets a virtual sibling (`downmix:<aid>`), labeled `<source> (Dialogue downmix)`. Selecting it keeps the real `aid` and applies lavfi pan + compressor + limiter. Selecting the original clears the filter. Downmix is never the default.
+On **MPV**, each multichannel audio track gets a virtual sibling labeled `<source> (Dialogue downmix)`. Selecting it keeps the original audio track and applies lavfi pan + compressor + limiter. Selecting the original clears the filter.
 
 ## Need
 
@@ -28,8 +28,6 @@ adb install dist/stremio-androidtv-downmix-1.10.4-armeabi-v7a.apk
 
 A keystore is created at `signing/downmix.jks` on the first run. Keep it so later patched builds upgrade in place.
 
-`vendor/`, `work/`, `dist/`, and `signing/` are local only.
-
 ## Versions and ABIs
 
 The DEX overlay does not contain native code. One overlay covers every ABI of a given Stremio version; `lib/` comes from that ABI’s official APK.
@@ -41,10 +39,33 @@ Overlay layout:
 - `overlay/common/` — `MpvDownmixTracks` (shared)
 - `overlay/<version>/` — patched `MpvPlayer` for that Stremio release
 
-A new Stremio version needs a new overlay. `MpvPlayer.smali` changes; copying an old player file will drop upstream fixes.
+A new Stremio version needs APKs in `catalog.json` (download one ABI, `sha256sum`, paste hashes). Whether you can reuse `"overlay": "1.10.4"` depends on the player classes, not the version string.
 
-1. Add the APKs to `catalog.json` (download once, `sha256sum`, paste hashes). You can reuse `"overlay": "1.10.4"` only if you have checked the player classes are unchanged.
-2. Decode one ABI: `apktool d vendor/<apk> -o /tmp/stremio`.
-3. Copy `overlay/common` in, then re-apply the three hooks in `overlay/1.10.4`’s `MpvPlayer.smali` / `MpvPlayer$eventObserver$1.smali` (`clear` on `load`, `apply` on `setTrack`, `rememberTrackList` + `expand` on `track-list`).
-4. Save the patched player files under `overlay/<new-version>/`.
-5. `./scripts/build.sh --version <new-version> --abi all`
+### Did the player classes change?
+
+Decode one ABI of the new APK, then diff the two files we patch against the 1.10.4 overlay:
+
+```sh
+apktool d vendor/com.stremio.one-<ver>-<code>-armeabi-v7a.apk -o /tmp/stremio
+P=smali_classes6/com/stremio/common/players
+diff -u overlay/1.10.4/$P/MpvPlayer.smali /tmp/stremio/$P/MpvPlayer.smali
+diff -u overlay/1.10.4/$P/MpvPlayer\$eventObserver\$1.smali /tmp/stremio/$P/MpvPlayer\$eventObserver\$1.smali
+```
+
+The overlay files already contain our hooks. **Unchanged** means the only hunks are those hooks (new file is missing them). If so, set `"overlay": "1.10.4"` and stop.
+
+**Changed** means anything else moved: extra methods, different `.locals`, renamed fields (`mpv`, `eventObserver`), different `load`/`setTrack` bodies, or the `track-list` mapper no longer calling `MpvPlayerKt.toTrack`. Do not copy the old player files on top — that would wipe Stremio’s own edits.
+
+Then start from the *new* stock files and re-apply the three hooks:
+
+1. `MpvPlayer.load` — first thing, `MpvDownmixTracks.clear(mpv)` so a new file never starts on downmix.
+2. `MpvPlayer.setTrack` — when the track is `AUDIO` and `mpv` is non-null, `MpvDownmixTracks.apply(mpv, track)` and republish `track-list` on `eventObserver` (so the checkmark can move). Leave the original `aid` path for non-audio.
+3. `MpvPlayer$eventObserver$1` `track-list` handler — `rememberTrackList(json)` before parse; after `toTrack(json)`, `addAll(MpvDownmixTracks.expand(track, json))` instead of adding the single track.
+
+Save those two patched files under `overlay/<new-version>/` with the same relative smali path. Set `"overlay": "<new-version>"`.
+
+Also glance at `Track.smali` / `MPVLib.smali` if the helper fails to smali. `overlay/common` (`MpvDownmixTracks`) only needs a change if the `Track` constructor/getters or `MPVLib.setProperty*` signatures changed.
+
+```sh
+./scripts/build.sh --version <new-version> --abi all
+```
