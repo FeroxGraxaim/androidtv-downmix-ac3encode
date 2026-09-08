@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Decode official Stremio Android TV 1.10.4, overlay MPV dialogue downmix, sign.
+# Keeps package com.stremio.one. Uninstall the official app before installing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,7 +10,6 @@ DIST="$ROOT/dist"
 SIGNING="$ROOT/signing"
 OVERLAY="$ROOT/overlay"
 
-PACKAGE="com.stremio.one.downmix"
 VERSION="1.10.4"
 UPSTREAM_URL="https://dl.strem.io/android/v1.10.4-androidTV/com.stremio.one-1.10.4-31048580-armeabi-v7a.apk"
 UPSTREAM_SHA="e18a5405bb53e12a903ff477457318b8f8d3c8e1995e0a4c3ff5d8893d1ccf0b"
@@ -63,32 +63,6 @@ decode() {
   rm -rf "$DECODED"
   echo "apktool decode"
   apktool d -f "$UPSTREAM_APK" -o "$DECODED"
-}
-
-rename_package() {
-  python3 - "$DECODED" <<'PY'
-import re, sys
-from pathlib import Path
-root = Path(sys.argv[1])
-pat = re.compile(r"com\.stremio\.one(?!\.downmix)")
-nfiles = 0
-for p in root.rglob("*"):
-    if not p.is_file():
-        continue
-    if p.suffix.lower() not in {".xml", ".yml", ".yaml", ".smali", ".txt"}:
-        continue
-    text = p.read_text(encoding="utf-8", errors="ignore")
-    new = pat.sub("com.stremio.one.downmix", text)
-    if new != text:
-        p.write_text(new, encoding="utf-8")
-        nfiles += 1
-print(f"renamed package in {nfiles} files")
-yml = root / "apktool.yml"
-if yml.exists():
-    t = yml.read_text(encoding="utf-8")
-    t = re.sub(r"^apkFileName:.*$", "apkFileName: com.stremio.one.downmix-1.10.4.apk", t, count=1, flags=re.M)
-    yml.write_text(t, encoding="utf-8")
-PY
 }
 
 apply_overlay() {
@@ -149,7 +123,6 @@ need apktool
 need zipalign
 need apksigner
 need keytool
-need python3
 need curl
 
 fetch_upstream
@@ -158,7 +131,6 @@ if [[ "$CLEAN" == 1 ]]; then
 else
   decode
 fi
-rename_package
 apply_overlay
 ensure_keystore
 rebuild
