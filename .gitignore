@@ -1,0 +1,16 @@
+vendor/
+work/
+dist/
+signing/
+build/
+
+*.apk
+*.aab
+*.idsig
+*.jks
+*.keystore
+*.pk8
+
+.DS_Store
+__pycache__/
+*.pyc
