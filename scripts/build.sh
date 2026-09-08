@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Decode official Stremio Android TV 1.10.4, overlay MPV dialogue downmix, sign.
-# Keeps package com.stremio.one. Uninstall the official app before installing.
+# Decode an official Stremio Android TV APK, overlay MPV dialogue downmix, sign.
+# Package stays com.stremio.one. Uninstall the official app before installing.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -8,16 +8,8 @@ VENDOR="$ROOT/vendor"
 WORK="$ROOT/work"
 DIST="$ROOT/dist"
 SIGNING="$ROOT/signing"
-OVERLAY="$ROOT/overlay"
+CATALOG="$ROOT/scripts/catalog.py"
 
-VERSION="1.10.4"
-UPSTREAM_URL="https://dl.strem.io/android/v1.10.4-androidTV/com.stremio.one-1.10.4-31048580-armeabi-v7a.apk"
-UPSTREAM_SHA="e18a5405bb53e12a903ff477457318b8f8d3c8e1995e0a4c3ff5d8893d1ccf0b"
-UPSTREAM_APK="$VENDOR/com.stremio.one-1.10.4-31048580-armeabi-v7a.apk"
-DECODED="$WORK/apktool"
-UNSIGNED="$WORK/unsigned.apk"
-ALIGNED="$WORK/aligned.apk"
-OUT_APK="$DIST/stremio-androidtv-downmix-${VERSION}.apk"
 KS="$SIGNING/downmix.jks"
 KS_ALIAS="downmix"
 KS_PASS="changeit"
@@ -33,41 +25,55 @@ sha256_of() {
   sha256sum "$1" | awk '{print $1}'
 }
 
+lookup() {
+  python3 "$CATALOG" "$ROOT" "$@"
+}
+
 fetch_upstream() {
   mkdir -p "$VENDOR"
   if [[ -f "$UPSTREAM_APK" ]]; then
     local have
     have="$(sha256_of "$UPSTREAM_APK")"
-    if [[ "$have" == "$UPSTREAM_SHA" ]]; then
-      echo "upstream apk ok ($UPSTREAM_SHA)"
+    if [[ "$have" == "$SHA256" ]]; then
+      echo "upstream apk ok ($ABI $SHA256)"
       return
     fi
     echo "upstream apk hash mismatch, re-downloading" >&2
   fi
-  echo "downloading official apk"
-  curl -fsSL "$UPSTREAM_URL" -o "$UPSTREAM_APK"
+  echo "downloading $URL"
+  curl -fL --retry 3 -o "$UPSTREAM_APK" "$URL"
   local have
   have="$(sha256_of "$UPSTREAM_APK")"
-  if [[ "$have" != "$UPSTREAM_SHA" ]]; then
-    echo "download hash $have, expected $UPSTREAM_SHA" >&2
+  if [[ "$have" != "$SHA256" ]]; then
+    echo "download hash $have, expected $SHA256" >&2
     exit 1
   fi
 }
 
 decode() {
-  mkdir -p "$WORK"
+  mkdir -p "$(dirname "$DECODED")"
   if [[ -d "$DECODED" && "${1:-}" != "force" ]]; then
     echo "reusing $DECODED (pass --clean to decode again)"
     return
   fi
   rm -rf "$DECODED"
-  echo "apktool decode"
+  echo "apktool decode ($VERSION $ABI)"
   apktool d -f "$UPSTREAM_APK" -o "$DECODED"
 }
 
 apply_overlay() {
-  echo "copy overlay smali"
-  cp -a "$OVERLAY/." "$DECODED/"
+  local common="$ROOT/overlay/common"
+  local verdir="$ROOT/overlay/$OVERLAY"
+  if [[ ! -d "$verdir" ]]; then
+    echo "no overlay for $VERSION (expected overlay/$OVERLAY)." >&2
+    echo "Port the MPV hooks from overlay/1.10.4 into overlay/$OVERLAY, then rebuild." >&2
+    exit 1
+  fi
+  echo "copy overlay common + $OVERLAY"
+  if [[ -d "$common" ]]; then
+    cp -a "$common/." "$DECODED/"
+  fi
+  cp -a "$verdir/." "$DECODED/"
 }
 
 ensure_keystore() {
@@ -85,7 +91,7 @@ ensure_keystore() {
 }
 
 rebuild() {
-  mkdir -p "$DIST" "$WORK"
+  mkdir -p "$DIST" "$(dirname "$UNSIGNED")"
   echo "apktool build"
   apktool b "$DECODED" -o "$UNSIGNED"
   echo "zipalign"
@@ -103,20 +109,68 @@ rebuild() {
   echo "sha256 $(sha256_of "$OUT_APK")"
 }
 
+load_apk() {
+  local version="$1" abi="$2"
+  eval "$(lookup apk "$version" "$abi")"
+  UPSTREAM_APK="$VENDOR/$FILENAME"
+  DECODED="$WORK/$VERSION/$ABI/apktool"
+  UNSIGNED="$WORK/$VERSION/$ABI/unsigned.apk"
+  ALIGNED="$WORK/$VERSION/$ABI/aligned.apk"
+  OUT_APK="$DIST/stremio-androidtv-downmix-${VERSION}-${ABI}.apk"
+}
+
+build_one() {
+  load_apk "$1" "$2"
+  fetch_upstream
+  if [[ "$CLEAN" == 1 ]]; then
+    decode force
+  else
+    decode
+  fi
+  apply_overlay
+  ensure_keystore
+  rebuild
+}
+
 CLEAN=0
-for arg in "$@"; do
-  case "$arg" in
+VERSION=""
+ABI=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --clean) CLEAN=1 ;;
+    --version)
+      VERSION="${2:?}"
+      shift
+      ;;
+    --abi)
+      ABI="${2:?}"
+      shift
+      ;;
+    --list)
+      lookup list
+      exit 0
+      ;;
     -h|--help)
-      echo "usage: $0 [--clean]"
-      echo "  --clean   decode the official apk from scratch"
+      cat <<EOF
+usage: $0 [--version VER] [--abi ABI|all] [--clean]
+
+  --version  catalog version (default: catalog default)
+  --abi      armeabi-v7a, arm64-v8a, x86, x86_64, or all
+             aliases: arm, arm64, x64
+  --clean    decode the official apk from scratch
+  --list     show catalog
+
+DEX overlay is per Stremio version and shared across ABIs.
+Native libs come from each official apk.
+EOF
       exit 0
       ;;
     *)
-      echo "unknown arg: $arg" >&2
+      echo "unknown arg: $1" >&2
       exit 1
       ;;
   esac
+  shift
 done
 
 need apktool
@@ -124,13 +178,21 @@ need zipalign
 need apksigner
 need keytool
 need curl
+need python3
 
-fetch_upstream
-if [[ "$CLEAN" == 1 ]]; then
-  decode force
-else
-  decode
+if [[ -z "$VERSION" ]]; then
+  VERSION="$(lookup default-version)"
 fi
-apply_overlay
-ensure_keystore
-rebuild
+if [[ -z "$ABI" ]]; then
+  ABI="armeabi-v7a"
+fi
+ABI="$(lookup canonical-abi "$ABI")"
+
+if [[ "$ABI" == "all" ]]; then
+  for one in $(lookup abis "$VERSION"); do
+    echo "======== $VERSION $one ========"
+    build_one "$VERSION" "$one"
+  done
+else
+  build_one "$VERSION" "$ABI"
+fi
