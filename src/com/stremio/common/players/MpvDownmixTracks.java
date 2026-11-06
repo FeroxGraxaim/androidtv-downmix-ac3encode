@@ -8,24 +8,29 @@ import java.util.Locale;
 import org.json.JSONObject;
 
 /**
- * MPV virtual "Dialogue downmix" rows plus lavfi pan/compressor toggle.
- * Matches stremio-android / stremio-shell: synthetic ID maps back to the real aid.
- *
- * PlaybackManager sorts audio by commentary, embedded, then label. The virtual
- * label is derived from the source so the row always sorts immediately below it.
- * {@link #clear} resets the sticky toggle on each new file so downmix is never default.
+ * MPV virtual audio rows: Dialogue downmix (lavfi) and AC3 encode (lavcac3enc).
+ * Synthetic IDs map back to the real aid. clear() resets mode on each new file.
  */
 public final class MpvDownmixTracks {
-    public static final String PREFIX = "downmix:";
-    public static final String LABEL = "Dialogue downmix";
-    public static final String FILTER =
+
+    public static final String PREFIX_DOWNMIX = "downmix:";
+    public static final String PREFIX_AC3 = "ac3enc:";
+
+    public static final String LABEL_DOWNMIX = "Dialogue downmix";
+    public static final String LABEL_AC3 = "AC3 5.1 encode";
+
+    public static final String FILTER_DOWNMIX =
             "lavfi=[pan=stereo|"
                     + "FL=0.50*FL+0.85*FC+0.20*LFE+0.35*BL+0.35*SL|"
                     + "FR=0.50*FR+0.85*FC+0.20*LFE+0.35*BR+0.35*SR,"
                     + "acompressor=threshold=0.125:ratio=3:attack=20:release=250:makeup=1.5,"
                     + "alimiter=limit=0.95:level=0]";
 
-    private static volatile boolean enabled;
+    public static final String FILTER_AC3 =
+            "lavcac3enc=tospdif=yes:bitrate=640:minch=3";
+
+    /** null = original; PREFIX_DOWNMIX / PREFIX_AC3 = virtual ativa */
+    private static volatile String mode;
     private static volatile String lastTrackList;
 
     private MpvDownmixTracks() {}
@@ -36,17 +41,20 @@ public final class MpvDownmixTracks {
         }
     }
 
+    /** Compat: qualquer virtual ativa. */
     public static boolean isEnabled() {
-        return enabled;
+        return mode != null;
     }
 
     public static void setEnabled(boolean value) {
-        enabled = value;
+        if (!value) {
+            mode = null;
+        }
     }
 
-    /** Reset sticky downmix when a new file is loaded. Never the default. */
+    /** Reset sticky mode when a new file is loaded. Never the default. */
     public static void clear(MPVLib mpv) {
-        enabled = false;
+        mode = null;
         if (mpv == null) {
             return;
         }
@@ -55,12 +63,24 @@ public final class MpvDownmixTracks {
     }
 
     public static boolean isVirtual(String id) {
-        return id != null && id.startsWith(PREFIX);
+        return id != null
+                && (id.startsWith(PREFIX_DOWNMIX) || id.startsWith(PREFIX_AC3));
+    }
+
+    public static boolean isDownmix(String id) {
+        return id != null && id.startsWith(PREFIX_DOWNMIX);
+    }
+
+    public static boolean isAc3(String id) {
+        return id != null && id.startsWith(PREFIX_AC3);
     }
 
     public static String sourceId(String id) {
-        if (isVirtual(id)) {
-            return id.substring(PREFIX.length());
+        if (isDownmix(id)) {
+            return id.substring(PREFIX_DOWNMIX.length());
+        }
+        if (isAc3(id)) {
+            return id.substring(PREFIX_AC3.length());
         }
         return id;
     }
@@ -73,10 +93,13 @@ public final class MpvDownmixTracks {
             return Collections.singletonList(source);
         }
         boolean mpvSelected = source.getSelected();
-        boolean downmix = isEnabled();
-        ArrayList<Track> out = new ArrayList<Track>(2);
-        out.add(copySelected(source, mpvSelected && !downmix));
-        out.add(virtualTrack(source, mpvSelected && downmix));
+        boolean downmixOn = PREFIX_DOWNMIX.equals(mode);
+        boolean ac3On = PREFIX_AC3.equals(mode);
+
+        ArrayList<Track> out = new ArrayList<Track>(3);
+        out.add(copySelected(source, mpvSelected && mode == null));
+        out.add(virtualTrack(source, PREFIX_DOWNMIX, LABEL_DOWNMIX, mpvSelected && downmixOn));
+        out.add(virtualTrack(source, PREFIX_AC3, LABEL_AC3, mpvSelected && ac3On));
         return out;
     }
 
@@ -85,22 +108,36 @@ public final class MpvDownmixTracks {
             return lastTrackList;
         }
         String id = track.getId();
-        boolean virtual = isVirtual(id);
-        setEnabled(virtual);
         String source = sourceId(id);
+
+        if (isDownmix(id)) {
+            mode = PREFIX_DOWNMIX;
+        } else if (isAc3(id)) {
+            mode = PREFIX_AC3;
+        } else {
+            mode = null;
+        }
+
         try {
             mpv.setPropertyInt("aid", Integer.parseInt(source));
         } catch (NumberFormatException ignored) {
             mpv.setPropertyString("aid", source);
         }
-        if (virtual) {
+
+        if (isDownmix(id)) {
             mpv.setPropertyString("ad-lavc-downmix", "no");
             mpv.setPropertyString("audio-channels", "stereo");
-            mpv.setPropertyString("af", FILTER);
+            mpv.setPropertyString("af", FILTER_DOWNMIX);
+        } else if (isAc3(id)) {
+            mpv.setPropertyString("ad-lavc-downmix", "no");
+            // manter multicanal para o encoder AC3
+            mpv.setPropertyString("audio-channels", "auto");
+            mpv.setPropertyString("af", FILTER_AC3);
         } else {
             mpv.setPropertyString("af", "");
             mpv.setPropertyString("audio-channels", "auto-safe");
         }
+
         String json = mpv.getPropertyString("track-list");
         if (json == null || json.length() == 0) {
             json = lastTrackList;
@@ -124,7 +161,8 @@ public final class MpvDownmixTracks {
         return lower.indexOf("dts") >= 0
                 || lower.indexOf("truehd") >= 0
                 || lower.indexOf("eac3") >= 0
-                || lower.indexOf("atmos") >= 0;
+                || lower.indexOf("atmos") >= 0
+                || lower.indexOf("aac") >= 0;
     }
 
     static int channelCount(JSONObject json) {
@@ -152,25 +190,20 @@ public final class MpvDownmixTracks {
         }
     }
 
-    /**
-     * PlaybackManager sorts audio by label. Prefix with the source title so
-     * this sibling sits immediately below the original. Untitled sources keep
-     * "Dialogue downmix", which still sorts after a null original label.
-     */
-    static String virtualLabel(Track source) {
+    static String virtualLabel(Track source, String label) {
         String src = source.getLabel();
         if (src == null || src.length() == 0) {
-            return LABEL;
+            return label;
         }
-        return src + " (" + LABEL + ")";
+        return src + " (" + label + ")";
     }
 
-    static Track virtualTrack(Track source, boolean selected) {
+    static Track virtualTrack(Track source, String prefix, String label, boolean selected) {
         return new Track(
                 source.getType(),
-                PREFIX + source.getId(),
+                prefix + source.getId(),
                 source.getUri(),
-                virtualLabel(source),
+                virtualLabel(source, label),
                 source.getLanguage(),
                 source.getEmbedded(),
                 source.getCommentary(),
